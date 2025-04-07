@@ -35,3 +35,37 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/ptar:${{ github.sha }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ptar:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ptar:buildcache,mode=max 
+      - name: Создание временной директории для артефактов
+        run: mkdir -p ./artifacts
+
+      - name: Извлечение бинарных файлов из контейнеров
+        run: |
+          # Извлечение для linux/amd64
+          docker create --name ptar_linux_amd64 --platform linux/amd64 ${{ secrets.DOCKERHUB_USERNAME }}/ptar:${{ github.sha }}
+          docker cp ptar_linux_amd64:/ptar ./artifacts/ptar-linux-amd64
+          docker rm ptar_linux_amd64
+          
+          # Извлечение для linux/arm64
+          docker create --name ptar_linux_arm64 --platform linux/arm64 ${{ secrets.DOCKERHUB_USERNAME }}/ptar:${{ github.sha }}
+          docker cp ptar_linux_arm64:/ptar ./artifacts/ptar-linux-arm64
+          docker rm ptar_linux_arm64
+          
+          # Извлечение для linux/arm/v7
+          docker create --name ptar_linux_armv7 --platform linux/arm/v7 ${{ secrets.DOCKERHUB_USERNAME }}/ptar:${{ github.sha }}
+          docker cp ptar_linux_armv7:/ptar ./artifacts/ptar-linux-armv7
+          docker rm ptar_linux_armv7
+          
+          # Извлечение для windows/amd64
+          docker create --name ptar_windows_amd64 --platform windows/amd64 ${{ secrets.DOCKERHUB_USERNAME }}/ptar:${{ github.sha }}
+          docker cp ptar_windows_amd64:/ptar ./artifacts/ptar-windows-amd64.exe
+          docker rm ptar_windows_amd64
+          
+          # Установка прав на выполнение для Linux-бинарников
+          chmod +x ./artifacts/ptar-linux-*
+
+      - name: Загрузка артефактов
+        uses: actions/upload-artifact@v3
+        with:
+          name: ptar-binaries
+          path: ./artifacts/
+          retention-days: 7

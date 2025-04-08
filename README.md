@@ -16,6 +16,10 @@ PTAR is a high-performance command-line utility written in Go that allows you to
 
 ### From source code
 
+```bash
+CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o ptar .
+```
+
 
 ----
 ----
@@ -39,3 +43,6 @@ PTAR - это высокопроизводительная утилита ком
 
 ### Из исходного кода
 
+```bash
+CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o ptar .
+```

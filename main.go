@@ -89,6 +89,9 @@ func main() {
 	// Канал для обработки ошибок
 	errChan := make(chan error, 1)
 
+	// Канал для сигнализации о прерывании работы
+	doneChan := make(chan struct{})
+
 	// WaitGroup для ожидания завершения всех читающих горутин
 	var wg sync.WaitGroup
 
@@ -98,14 +101,34 @@ func main() {
 	// Семафор для ограничения количества одновременных операций чтения
 	readSemaphore := make(chan struct{}, *maxWorkers)
 
+	// Переменная для отслеживания возникновения ошибки
+	var processingError error
+	var errorMutex sync.Mutex
+
+	// Функция для проверки наличия ошибки
+	hasError := func() bool {
+		errorMutex.Lock()
+		defer errorMutex.Unlock()
+		return processingError != nil
+	}
+
 	// Запуск горутины-архиватора
 	archiverWg.Add(1)
 	go func() {
 		defer archiverWg.Done()
 		for data := range fileChan {
+			// Прерываем обработку, если возникла ошибка
+			if hasError() {
+				continue
+			}
+
 			// Создание заголовка tar
 			header, err := tar.FileInfoHeader(data.Info, "")
 			if err != nil {
+				errorMutex.Lock()
+				processingError = err
+				errorMutex.Unlock()
+				close(doneChan) // Сигнализируем о прерывании работы
 				errChan <- err
 				return
 			}
@@ -113,6 +136,10 @@ func main() {
 
 			// Запись заголовка
 			if err := tw.WriteHeader(header); err != nil {
+				errorMutex.Lock()
+				processingError = err
+				errorMutex.Unlock()
+				close(doneChan) // Сигнализируем о прерывании работы
 				errChan <- err
 				return
 			}
@@ -120,6 +147,10 @@ func main() {
 			// Запись содержимого файла (если это не директория)
 			if !data.Info.IsDir() {
 				if _, err := tw.Write(data.Content); err != nil {
+					errorMutex.Lock()
+					processingError = err
+					errorMutex.Unlock()
+					close(doneChan) // Сигнализируем о прерывании работы
 					errChan <- err
 					return
 				}
@@ -140,6 +171,11 @@ func main() {
 		if err != nil {
 			log.Printf("Ошибка доступа к '%s': %v", path, err)
 			return nil
+		}
+
+		// Прерываем обработку, если возникла ошибка
+		if hasError() {
+			return filepath.SkipAll
 		}
 
 		// Получаем абсолютный путь к текущему файлу
@@ -204,8 +240,8 @@ func main() {
 					log.Printf("ПРОГРЕСС: Обработано файлов: %d из %d", processedFiles, totalFiles)
 				}
 				processedMutex.Unlock()
-			case err := <-errChan:
-				log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Ошибка при архивации: %v", err)
+			case <-doneChan:
+				// Прерываем обработку по сигналу
 				return
 			}
 		}(path, relPath, info)
@@ -215,6 +251,7 @@ func main() {
 
 	if err != nil {
 		log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Ошибка обхода директории '%s': %v", *inputDir, err)
+		close(doneChan) // Сигнализируем об ошибке, чтобы горутины могли завершиться
 	}
 
 	// Ожидание завершения всех читающих горутин
@@ -231,6 +268,10 @@ func main() {
 	case err := <-errChan:
 		log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Ошибка при архивации: %v", err)
 	default:
-		log.Printf("УСПЕХ: Архивация завершена успешно. Обработано файлов: %d из %d", processedFiles, totalFiles)
+		if processingError != nil {
+			log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Ошибка при архивации: %v", processingError)
+		} else {
+			log.Printf("УСПЕХ: Архивация завершена успешно. Обработано файлов: %d из %d", processedFiles, totalFiles)
+		}
 	}
 }

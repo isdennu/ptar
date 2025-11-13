@@ -6,8 +6,10 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 // fileData содержит информацию о файле для передачи в канал архиватору.
@@ -48,15 +50,21 @@ func main() {
 		log.Fatalf("Ошибка получения абсолютного пути: %v", err)
 	}
 
-	// Подсчет общего количества файлов
+	// Получаем абсолютный путь к исполняемому файлу
+	absExecutable, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		log.Printf("Предупреждение: не удалось получить абсолютный путь к исполняемому файлу: %v", err)
+		absExecutable = os.Args[0] // Используем как есть в случае ошибки
+	}
+
+	// Подсчет общего количества файлов и директорий
 	var totalFiles int
 	err = filepath.WalkDir(*inputDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
-			totalFiles++
-		}
+		// Считаем и файлы, и директории, так как оба добавляются в архив
+		totalFiles++
 		return nil
 	})
 	if err != nil {
@@ -81,7 +89,11 @@ func main() {
 
 	// Создание писателя tar архива
 	tw := tar.NewWriter(tarFile)
-	defer tw.Close()
+	defer func() {
+		if err := tw.Close(); err != nil {
+			log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Ошибка при закрытии tar-архива: %v", err)
+		}
+	}()
 
 	// Канал для передачи данных о файлах от читателей к архиватору
 	fileChan := make(chan fileData, *maxWorkers*2)
@@ -91,6 +103,23 @@ func main() {
 
 	// Канал для сигнализации о прерывании работы
 	doneChan := make(chan struct{})
+	var doneOnce sync.Once // Для безопасного закрытия doneChan только один раз
+
+	// Функция для безопасного закрытия doneChan
+	closeDone := func() {
+		doneOnce.Do(func() {
+			close(doneChan)
+		})
+	}
+
+	// Обработка сигналов прерывания (Ctrl+C)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Printf("Получен сигнал прерывания, завершаем работу...")
+		closeDone()
+	}()
 
 	// WaitGroup для ожидания завершения всех читающих горутин
 	var wg sync.WaitGroup
@@ -128,18 +157,18 @@ func main() {
 				errorMutex.Lock()
 				processingError = err
 				errorMutex.Unlock()
-				close(doneChan) // Сигнализируем о прерывании работы
+				closeDone() // Сигнализируем о прерывании работы
 				errChan <- err
 				return
 			}
-			header.Name = data.RelPath
+			header.Name = filepath.ToSlash(data.RelPath) // Нормализация пути для TAR
 
 			// Запись заголовка
 			if err := tw.WriteHeader(header); err != nil {
 				errorMutex.Lock()
 				processingError = err
 				errorMutex.Unlock()
-				close(doneChan) // Сигнализируем о прерывании работы
+				closeDone() // Сигнализируем о прерывании работы
 				errChan <- err
 				return
 			}
@@ -150,7 +179,7 @@ func main() {
 					errorMutex.Lock()
 					processingError = err
 					errorMutex.Unlock()
-					close(doneChan) // Сигнализируем о прерывании работы
+					closeDone() // Сигнализируем о прерывании работы
 					errChan <- err
 					return
 				}
@@ -175,7 +204,7 @@ func main() {
 
 		// Прерываем обработку, если возникла ошибка
 		if hasError() {
-			return filepath.SkipAll
+			return fs.SkipAll
 		}
 
 		// Получаем абсолютный путь к текущему файлу
@@ -186,7 +215,7 @@ func main() {
 		}
 
 		// Пропускаем выходной файл и исполняемый файл
-		if absPath == absOutputFile || absPath == os.Args[0] {
+		if absPath == absOutputFile || absPath == absExecutable {
 			log.Printf("ПРОПУЩЕН ФАЙЛ: %s (причина: выходной файл или исполняемый файл)", path)
 			return nil
 		}
@@ -251,7 +280,7 @@ func main() {
 
 	if err != nil {
 		log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Ошибка обхода директории '%s': %v", *inputDir, err)
-		close(doneChan) // Сигнализируем об ошибке, чтобы горутины могли завершиться
+		closeDone() // Сигнализируем об ошибке, чтобы горутины могли завершиться
 	}
 
 	// Ожидание завершения всех читающих горутин
